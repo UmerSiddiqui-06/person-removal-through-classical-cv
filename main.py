@@ -44,3 +44,7 @@ def read_frames(input_folder: str) -> np.ndarray:
     frames = np.stack(frames, axis=0)  # [F, H, W]
     return frames
 
+# Example Usage:
+input_folder = "input/snowFall_frames"
+frames = read_frames(input_folder)
+print(f"Frames shape: {frames.shape}")  # [F, H, W]
