@@ -98,6 +98,32 @@ def compute_mean_frames(frames:np.ndarray) -> np.ndarray:
 
     return mean.astype(np.uint8) 
 
+
+def compute_variance(frames: np.ndarray, mean_frame: np.ndarray) -> np.ndarray:
+    """
+    Computes variance for each pixel across frames.
+
+    Input:
+        frames (np.ndarray): Array of shape [F, H, W]
+        mean_frame (np.ndarray): Mean frame of shape [H, W]
+
+    Output:
+        np.ndarray: Variance frame of shape [H, W]
+
+    """
+    F, H, W = frames.shape
+    variance = np.zeros((H, W), dtype=float)
+
+    for i in range(H):
+        for j in range(W):
+            sum_sq = 0
+            for f in range(F):
+                diff = frames[f, i, j] - mean_frame[i, j]
+                sum_sq += diff ** 2
+            variance[i, j] = sum_sq / F
+
+    return variance.astype(np.uint8)
+
 # Example Usage:
 input_folder = "input/snowFall_frames"
 frames = read_frames(input_folder)
