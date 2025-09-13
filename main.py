@@ -71,6 +71,33 @@ def plot_frames(frames: np.ndarray, num_frames: int, save_name: str) -> None:
     plt.tight_layout()
     plt.savefig(save_name, dpi=300, bbox_inches="tight")
     plt.close()
+
+def compute_mean_frames(frames:np.ndarray) -> np.ndarray:
+    """
+    Compute the mean across all frames for each pixel in a 2D array.
+
+    Parameters:
+        arr : numpy.ndarray
+            Input array of shape [F, H, W]
+            F: Total number of frames
+            H: Height of an image
+            W: Width of an image
+
+    Returns:
+        numpy.ndarray : 2D array of shape [H, W] with mean values
+    """
+    F, H, W = frames.shape
+    mean = np.zeros((H, W), dtype=float)
+
+    for i in range(H):
+        for j in range(W):
+            sum_val = 0
+            for f in range(F):
+                sum_val += frames[f, i, j]  
+            mean[i, j] = sum_val / F
+
+    return mean.astype(np.uint8) 
+
 # Example Usage:
 input_folder = "input/snowFall_frames"
 frames = read_frames(input_folder)
