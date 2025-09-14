@@ -154,6 +154,87 @@ def compute_mask(frame, mean_frame, variance_frame, threshold=5.0):
 
     return mask
 
+def create_kernel(kernel_size=3):
+    """Create a square kernel for morphological operations"""
+    return np.ones((kernel_size, kernel_size), dtype=np.uint8)
+def erode(mask, kernel, anchor, iterations=1):
+    """
+    Performs erosion on binary mask.
+    
+    Parameters:
+    mask (np.ndarray): Binary mask [H, W]
+    kernel (np.ndarray): Structuring element
+    anchor: a tuple (r, c)
+    iterations (int): Number of times to apply operation
+    
+    Returns:
+    np.ndarray: Eroded mask
+    """
+    H, W = mask.shape
+    kH, kW = kernel.shape
+    aH, aW = anchor  # anchor row, col
+
+    result = mask.copy()
+    for _ in range(iterations):
+        padded = np.pad(result, ((aH, kH - aH - 1), (aW, kW - aW - 1)), 
+                        mode='constant', constant_values=0)
+        new = np.zeros_like(result)
+
+        for i in range(H):
+            for j in range(W):
+                region = padded[i:i+kH, j:j+kW]
+                # all neighbors under kernel must be 1
+                if np.all(region[kernel == 1] == 1):
+                    new[i, j] = 1
+        result = new
+    return result
+def dilate(mask, kernel, anchor, iterations=1):
+    """
+    Performs dilation on binary mask.
+    
+    Parameters:
+    mask (np.ndarray): Binary mask [H, W]
+    kernel (np.ndarray): Structuring element
+    anchor: a tuple (r, c)
+    iterations (int): Number of times to apply operation
+    
+    Returns:
+    np.ndarray: Dilated mask
+    """
+    H, W = mask.shape
+    kH, kW = kernel.shape
+    aH, aW = anchor  # anchor row, col
+
+    result = mask.copy()
+    for _ in range(iterations):
+        padded = np.pad(result, ((aH, kH - aH - 1), (aW, kW - aW - 1)), 
+                        mode='constant', constant_values=0)
+        new = np.zeros_like(result)
+
+        for i in range(H):
+            for j in range(W):
+                region = padded[i:i+kH, j:j+kW]
+                # at least one neighbor under kernel must be 1
+                if np.any(region[kernel == 1] == 1):
+                    new[i, j] = 1
+        result = new
+    return result
+def morphological_operations(mask, kernel_size=3):
+    """
+    Applies opening (erosion followed by dilation) to remove noise.
+    
+    Parameters:
+    mask (np.ndarray): Binary mask [H, W]
+    kernel_size (int): Size of structuring element
+    
+    Returns:
+    np.ndarray: Cleaned mask
+    """
+    kernel = create_kernel(kernel_size)
+    # Apply opening: erosion followed by dilation
+    eroded = erode(mask, kernel, (1, 1), iterations=1)
+    cleaned = dilate(eroded, kernel, (1, 1), iterations=1)
+
 # Example Usage:
 input_folder = "input/snowFall_frames"
 frames = read_frames(input_folder)
