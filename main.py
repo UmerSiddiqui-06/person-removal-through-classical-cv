@@ -5,6 +5,7 @@ import os
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
+from collections import deque
 def _rgb_to_gray(img: np.ndarray) -> np.ndarray:
     # extract R, G, B
     R = img[:, :, 0]
@@ -234,6 +235,74 @@ def morphological_operations(mask, kernel_size=3):
     # Apply opening: erosion followed by dilation
     eroded = erode(mask, kernel, (1, 1), iterations=1)
     cleaned = dilate(eroded, kernel, (1, 1), iterations=1)
+
+def find_connected_components(mask, connectivity=8):
+    """
+    Finds connected components in binary mask using BFS.
+    
+    Parameters:
+    mask (np.ndarray): Binary mask [H, W]
+    connectivity (int): 4 or 8 connectivity
+    
+    Returns:
+    tuple: (num_components, labeled_mask, component_info)
+    """
+    H, W = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    labeled_mask = np.zeros_like(mask, dtype=np.int32)
+
+    # neighbor directions
+    if connectivity == 4:
+        directions = [(-1,0),(1,0),(0,-1),(0,1)]
+    else:  # 8-connectivity
+        directions = [(-1,0),(1,0),(0,-1),(0,1),
+                      (-1,-1),(-1,1),(1,-1),(1,1)]
+
+    component_info = []
+    comp_id = 0
+
+    for i in range(H):
+        for j in range(W):
+            if mask[i, j] == 1 and not visited[i, j]:
+                comp_id += 1
+                q = deque([(i,j)])
+                visited[i, j] = True
+                labeled_mask[i, j] = comp_id
+
+                # stats
+                pixels = []
+                min_r, max_r = i, i
+                min_c, max_c = j, j
+
+                while q:
+                    r, c = q.popleft()
+                    pixels.append((r,c))
+
+                    # update bbox
+                    min_r, max_r = min(min_r,r), max(max_r,r)
+                    min_c, max_c = min(min_c,c), max(max_c,c)
+
+                    for dr, dc in directions:
+                        nr, nc = r+dr, c+dc
+                        if 0 <= nr < H and 0 <= nc < W:
+                            if mask[nr, nc] == 1 and not visited[nr, nc]:
+                                visited[nr, nc] = True
+                                labeled_mask[nr, nc] = comp_id
+                                q.append((nr, nc))
+
+                # compute stats
+                area = len(pixels)
+                centroid_r = sum([p[0] for p in pixels]) / area
+                centroid_c = sum([p[1] for p in pixels]) / area
+
+                component_info.append({
+                    "id": comp_id,
+                    "area": area,
+                    "centroid": (centroid_r, centroid_c),
+                    "bbox": (min_r, min_c, max_r, max_c)
+                })
+
+    return comp_id, labeled_mask, component_info
 
 # Example Usage:
 input_folder = "input/snowFall_frames"
