@@ -124,6 +124,36 @@ def compute_variance(frames: np.ndarray, mean_frame: np.ndarray) -> np.ndarray:
 
     return variance.astype(np.uint8)
 
+def compute_mask(frame, mean_frame, variance_frame, threshold=5.0):
+    """
+    Computes motion mask using Mahalanobis distance.
+    
+    Parameters:
+    frame (np.ndarray): Current frame [H, W]
+    mean_frame (np.ndarray): Mean background [H, W]
+    variance_frame (np.ndarray): Variance background [H, W]
+    threshold (float): Distance threshold
+    
+    Returns:
+    np.ndarray: Binary mask where 1 indicates motion
+    """
+    # to avoid divide by zero
+    epsilon = 1e-6
+
+    # absolute difference between frame and background
+    diff = np.abs(frame - mean_frame)
+
+    # standard deviation from variance
+    std = np.sqrt(variance_frame + epsilon)
+
+    # Mahalanobis distance
+    M = diff / std
+
+    # thresholding
+    mask = (M > threshold).astype(np.uint8)
+
+    return mask
+
 # Example Usage:
 input_folder = "input/snowFall_frames"
 frames = read_frames(input_folder)
