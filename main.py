@@ -6,6 +6,9 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 from collections import deque
+import argparse
+import zlib, struct
+
 def _rgb_to_gray(img: np.ndarray) -> np.ndarray:
     # extract R, G, B
     R = img[:, :, 0]
@@ -14,7 +17,7 @@ def _rgb_to_gray(img: np.ndarray) -> np.ndarray:
 
     # apply formula
     gray = 0.299 * R + 0.587 * G + 0.114 * B
-    return gray.astype(np.uint8)
+    return gray.astype(np.float32)
 def read_frames(input_folder: str) -> np.ndarray:
     """
     Reads frames without using OpenCV.
@@ -88,16 +91,17 @@ def compute_mean_frames(frames:np.ndarray) -> np.ndarray:
         numpy.ndarray : 2D array of shape [H, W] with mean values
     """
     F, H, W = frames.shape
-    mean = np.zeros((H, W), dtype=float)
+    mean = np.zeros((H, W), dtype=np.float32)
 
     for i in range(H):
         for j in range(W):
-            sum_val = 0
+            sum_val = 0.0
             for f in range(F):
-                sum_val += frames[f, i, j]  
+                sum_val += float(frames[f, i, j])  
             mean[i, j] = sum_val / F
 
-    return mean.astype(np.uint8) 
+
+    return mean
 
 
 def compute_variance(frames: np.ndarray, mean_frame: np.ndarray) -> np.ndarray:
@@ -113,17 +117,18 @@ def compute_variance(frames: np.ndarray, mean_frame: np.ndarray) -> np.ndarray:
 
     """
     F, H, W = frames.shape
-    variance = np.zeros((H, W), dtype=float)
+    variance = np.zeros((H, W), dtype=np.float32)
 
     for i in range(H):
         for j in range(W):
-            sum_sq = 0
+            sum_sq = 0.0
             for f in range(F):
-                diff = frames[f, i, j] - mean_frame[i, j]
+                diff = float(frames[f, i, j]) - float(mean_frame[i, j])
                 sum_sq += diff ** 2
+
             variance[i, j] = sum_sq / F
 
-    return variance.astype(np.uint8)
+    return variance
 
 def compute_mask(frame, mean_frame, variance_frame, threshold=5.0):
     """
@@ -140,9 +145,9 @@ def compute_mask(frame, mean_frame, variance_frame, threshold=5.0):
     """
     # to avoid divide by zero
     epsilon = 1e-6
-
+    frame_f = frame.astype(np.float32)
     # absolute difference between frame and background
-    diff = np.abs(frame - mean_frame)
+    diff = np.abs(frame_f- mean_frame)
 
     # standard deviation from variance
     std = np.sqrt(variance_frame + epsilon)
@@ -155,7 +160,7 @@ def compute_mask(frame, mean_frame, variance_frame, threshold=5.0):
 
     return mask
 
-def create_kernel(kernel_size=3):
+def create_kernel(kernel_size=5):
     """Create a square kernel for morphological operations"""
     return np.ones((kernel_size, kernel_size), dtype=np.uint8)
 def erode(mask, kernel, anchor, iterations=1):
@@ -220,7 +225,7 @@ def dilate(mask, kernel, anchor, iterations=1):
                     new[i, j] = 1
         result = new
     return result
-def morphological_operations(mask, kernel_size=3):
+def morphological_operations(mask, kernel_size=5):
     """
     Applies opening (erosion followed by dilation) to remove noise.
     
@@ -235,77 +240,120 @@ def morphological_operations(mask, kernel_size=3):
     # Apply opening: erosion followed by dilation
     eroded = erode(mask, kernel, (1, 1), iterations=1)
     cleaned = dilate(eroded, kernel, (1, 1), iterations=1)
+    return cleaned
 
-def find_connected_components(mask, connectivity=8):
+def write_png(image: np.ndarray, filename: str) -> None:
     """
-    Finds connected components in binary mask using BFS.
+    Save a grayscale or RGB NumPy image to a PNG file using zlib.
     
+    Args:
+        image (np.ndarray): Image array (H x W) for grayscale or (H x W x 3) for RGB.
+        filename (str): Path to save the .png file.
+    """
+    # Ensure uint8
+    if image.dtype != np.uint8:
+        image = np.clip(image, 0, 255).astype(np.uint8)
+
+    height, width = image.shape[:2]
+    depth = 8  # bits per channel
+    
+    if image.ndim == 2:
+        color_type = 0  # grayscale
+    elif image.ndim == 3 and image.shape[2] == 3:
+        color_type = 2  # RGB
+    else:
+        raise ValueError("Only grayscale or RGB images supported.")
+
+    # PNG header
+    png_signature = b"\x89PNG\r\n\x1a\n"
+
+    def chunk(tag, data):
+        return (struct.pack("!I", len(data)) +
+                tag +
+                data +
+                struct.pack("!I", zlib.crc32(tag + data) & 0xffffffff))
+
+    # IHDR chunk
+    ihdr = struct.pack("!2I5B", width, height, depth, color_type, 0, 0, 0)
+
+    # Add filter byte (0) at start of each scanline
+    if image.ndim == 2:
+        raw_data = b"".join(b"\x00" + image[y, :].tobytes() for y in range(height))
+    else:  # RGB
+        raw_data = b"".join(b"\x00" + image[y, :, :].tobytes() for y in range(height))
+
+    # Compress with zlib
+    compressed = zlib.compress(raw_data, level=9)
+
+    # Build PNG
+    with open(filename, "wb") as f:
+        f.write(png_signature)
+        f.write(chunk(b"IHDR", ihdr))
+        f.write(chunk(b"IDAT", compressed))
+        f.write(chunk(b"IEND", b""))
+
+def scale_to_uint8(arr: np.ndarray) -> np.ndarray:
+    """
+    Normalize a NumPy array to 0–255 and convert to uint8.
+
     Parameters:
-    mask (np.ndarray): Binary mask [H, W]
-    connectivity (int): 4 or 8 connectivity
-    
+        arr (np.ndarray): Input array (any numeric dtype).
+
     Returns:
-    tuple: (num_components, labeled_mask, component_info)
+        np.ndarray: Array scaled to range [0, 255] as uint8.
     """
-    H, W = mask.shape
-    visited = np.zeros_like(mask, dtype=bool)
-    labeled_mask = np.zeros_like(mask, dtype=np.int32)
+    arr = np.asarray(arr, dtype=np.float32)
+    min_val, max_val = arr.min(), arr.max()
 
-    # neighbor directions
-    if connectivity == 4:
-        directions = [(-1,0),(1,0),(0,-1),(0,1)]
-    else:  # 8-connectivity
-        directions = [(-1,0),(1,0),(0,-1),(0,1),
-                      (-1,-1),(-1,1),(1,-1),(1,1)]
+    # Handle nearly constant arrays
+    if max_val - min_val < 1e-8:
+        return np.clip(arr, 0, 255).astype(np.uint8)
 
-    component_info = []
-    comp_id = 0
+    # Normalize to [0, 255]
+    scaled = (arr - min_val) * 255.0 / (max_val - min_val)
+    return scaled.clip(0, 255).astype(np.uint8)
 
-    for i in range(H):
-        for j in range(W):
-            if mask[i, j] == 1 and not visited[i, j]:
-                comp_id += 1
-                q = deque([(i,j)])
-                visited[i, j] = True
-                labeled_mask[i, j] = comp_id
 
-                # stats
-                pixels = []
-                min_r, max_r = i, i
-                min_c, max_c = j, j
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_folder", type=str, required=True)
+    parser.add_argument("--output_folder", type=str, required=True)
+    parser.add_argument("--input_ext", type=str, default="png")
+    parser.add_argument("--output_ext", type=str, default="png")
+    parser.add_argument("--video_format", type=str, default="mp4")
+    args = parser.parse_args()
 
-                while q:
-                    r, c = q.popleft()
-                    pixels.append((r,c))
+    os.makedirs(args.output_folder, exist_ok=True)
 
-                    # update bbox
-                    min_r, max_r = min(min_r,r), max(max_r,r)
-                    min_c, max_c = min(min_c,c), max(max_c,c)
+    # 1. Read frames
+    frames = read_frames(args.input_folder)
 
-                    for dr, dc in directions:
-                        nr, nc = r+dr, c+dc
-                        if 0 <= nr < H and 0 <= nc < W:
-                            if mask[nr, nc] == 1 and not visited[nr, nc]:
-                                visited[nr, nc] = True
-                                labeled_mask[nr, nc] = comp_id
-                                q.append((nr, nc))
+    # 2. Select number of frames for background model
+    if "person1" in args.input_folder.lower():
+        t = 70
+    elif "person3" in args.input_folder.lower():
+        t = 60
+    else:
+        t = len(frames)
 
-                # compute stats
-                area = len(pixels)
-                centroid_r = sum([p[0] for p in pixels]) / area
-                centroid_c = sum([p[1] for p in pixels]) / area
+    # 3. Compute mean and variance
+    mean_frame = compute_mean_frames(frames[:t])
+    var_frame = compute_variance(frames[:t], mean_frame)
 
-                component_info.append({
-                    "id": comp_id,
-                    "area": area,
-                    "centroid": (centroid_r, centroid_c),
-                    "bbox": (min_r, min_c, max_r, max_c)
-                })
+    # Save mean and variance images
+    write_png(scale_to_uint8(mean_frame), os.path.join(args.output_folder, "mean.png"))
+    write_png(scale_to_uint8(var_frame), os.path.join(args.output_folder, "variance.png"))
 
-    return comp_id, labeled_mask, component_info
+    # 4. Generate masks + morphological cleaning
+    masks = []
+    for idx, frame in enumerate(frames):
+        mask = compute_mask(frame, mean_frame, var_frame, threshold=2.0)
+        mask = morphological_operations(mask, kernel_size=3)
+        masks.append((mask * 255).astype(np.uint8))
 
-# Example Usage:
-input_folder = "input/snowFall_frames"
-frames = read_frames(input_folder)
-print(f"Frames shape: {frames.shape}")  # [F, H, W] 
-plot_frames(frames, num_frames=10, save_name="report.pdf")
+        out_path = os.path.join(args.output_folder, f"mask_{idx:04d}.{args.output_ext}")
+        write_png(masks[-1], out_path)
+
+
+if __name__ == "__main__":
+    main()
