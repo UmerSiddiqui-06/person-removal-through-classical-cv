@@ -3,11 +3,14 @@
 # Assignment: 01
 import os
 import numpy as np
+import cv2
 from PIL import Image
 import matplotlib.pyplot as plt
 from collections import deque
 import argparse
 import zlib, struct
+import random
+from concurrent.futures import ProcessPoolExecutor
 
 def _rgb_to_gray(img: np.ndarray) -> np.ndarray:
     # extract R, G, B
@@ -313,6 +316,158 @@ def scale_to_uint8(arr: np.ndarray) -> np.ndarray:
     scaled = (arr - min_val) * 255.0 / (max_val - min_val)
     return scaled.clip(0, 255).astype(np.uint8)
 
+def find_connected_components(
+    mask: np.ndarray,
+    connectivity: int = 8,
+    min_area: int =40,
+    max_area: int = 30000,
+):
+    H, W = mask.shape
+    visited = np.zeros((H, W), dtype=bool)
+    labeled_mask = np.zeros((H, W), dtype=np.int32)
+    binary_clean = np.zeros((H, W), dtype=np.uint8)  # <--- NEW
+
+    if connectivity == 4:
+        directions = [(1,0), (-1,0), (0,1), (0,-1)]
+    else:
+        directions = [(1,0), (-1,0), (0,1), (0,-1),
+                      (1,1), (-1,-1), (1,-1), (-1,1)]
+
+    component_info = []
+    label = 0
+
+    for i in range(H):
+        for j in range(W):
+            if mask[i, j] == 1 and not visited[i, j]:
+                label += 1
+                q = deque()
+                q.append((i, j))
+                visited[i, j] = True
+
+                pixels = []
+                min_r, min_c = i, j
+                max_r, max_c = i, j
+                sum_r, sum_c = 0, 0
+
+                while q:
+                    r, c = q.popleft()
+                    labeled_mask[r, c] = label
+                    pixels.append((r, c))
+                    sum_r += r
+                    sum_c += c
+                    min_r, min_c = min(min_r, r), min(min_c, c)
+                    max_r, max_c = max(max_r, r), max(max_c, c)
+
+                    for dr, dc in directions:
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < H and 0 <= nc < W:
+                            if mask[nr, nc] == 1 and not visited[nr, nc]:
+                                visited[nr, nc] = True
+                                q.append((nr, nc))
+
+                area = len(pixels)
+                centroid = (sum_r / area, sum_c / area)
+                bbox_w = max_c - min_c + 1
+                bbox_h = max_r - min_r + 1
+
+                # Keep only valid blobs
+                if min_area <= area <= max_area:
+                    component_info.append({
+                        "label": label,
+                        "area": area,
+                        "centroid": centroid,
+                        "bbox": (min_r, min_c, max_r, max_c)
+                    })
+                    for r, c in pixels:
+                        binary_clean[r, c] = 255  # <--- mark as white
+                else:
+                    for r, c in pixels:
+                        labeled_mask[r, c] = 0
+
+    return len(component_info), labeled_mask, binary_clean, component_info
+
+
+
+
+def visualize_components(labeled_mask: np.ndarray, output_file: str):
+    """
+    Save a visualization of connected components with random colors.
+    Returns the colored frame as np.ndarray.
+    """
+    H, W = labeled_mask.shape
+    colored = np.zeros((H, W, 3), dtype=np.uint8)
+
+    unique_labels = np.unique(labeled_mask)
+    for label in unique_labels:
+        if label == 0:  # background
+            continue
+        color = [random.randint(50, 255) for _ in range(3)]
+        colored[labeled_mask == label] = color
+
+    write_png(colored, output_file)
+    return colored   # <--- important
+
+
+
+def make_video(frames, output_file, fps=20):
+    """
+    Save a list of frames (grayscale or RGB) as a video.
+
+    Args:
+        frames (list of np.ndarray): Each frame is [H, W] (uint8) or [H, W, 3] (uint8)
+        output_file (str): Path to save video
+        fps (int): Frames per second
+    """
+    h, w = frames[0].shape[:2]
+
+    # Check if input is grayscale or color
+    is_color = (frames[0].ndim == 3 and frames[0].shape[2] == 3)
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output_file, fourcc, fps, (w, h), isColor=is_color)
+
+    for f in frames:
+        if is_color:
+            writer.write(f)  # RGB already
+        else:
+            writer.write(f)  # keep grayscale
+    writer.release()
+
+
+
+def process_single_frame(idx, frame, mean_frame, var_frame, args, masks_dir, comps_dir):
+    # 1. Compute mask + clean
+    mask = compute_mask(frame, mean_frame, var_frame, threshold=1)
+    mask = morphological_operations(mask, kernel_size=3)
+    mask_out = (mask * 255).astype(np.uint8)
+
+    # 2. Save raw mask
+    mask_path = os.path.join(masks_dir, f"mask_{idx:04d}.{args.output_ext}")
+    write_png(mask_out, mask_path)
+
+    # --- Create subfolders ---
+    comp_masks_dir = os.path.join(comps_dir, "comp_masks")
+    comp_labels_dir = os.path.join(comps_dir, "comp_labels")
+    os.makedirs(comp_masks_dir, exist_ok=True)
+    os.makedirs(comp_labels_dir, exist_ok=True)
+
+    # 3. Connected components
+    num, labeled_mask, comp_mask, info = find_connected_components(
+        mask, connectivity=8, min_area=60
+    )
+
+    # Save binary cleaned components (black/white)
+    comp_bw_path = os.path.join(comp_masks_dir, f"comp_mask_{idx:04d}.{args.output_ext}")
+    write_png(comp_mask, comp_bw_path)
+
+    # Save visualization (colored blobs)
+    comp_vis_path = os.path.join(comp_labels_dir, f"components_{idx:04d}.{args.output_ext}")
+    comp_vis = visualize_components(labeled_mask, comp_vis_path)
+
+    return idx, mask_out, comp_mask, comp_vis
+
+
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -323,7 +478,18 @@ def main():
     parser.add_argument("--video_format", type=str, default="mp4")
     args = parser.parse_args()
 
-    os.makedirs(args.output_folder, exist_ok=True)
+    # --- Get dataset name (last part of input path) ---
+    dataset_name = os.path.basename(os.path.normpath(args.input_folder))
+    base_out = os.path.join(args.output_folder, dataset_name)
+    os.makedirs(base_out, exist_ok=True)
+
+    # --- Subfolders ---
+    masks_dir = os.path.join(base_out, "masks")
+    comp_masks_dir = os.path.join(base_out, "components", "comp_masks")
+    comp_labels_dir = os.path.join(base_out, "components", "comp_labels")
+    os.makedirs(masks_dir, exist_ok=True)
+    os.makedirs(comp_masks_dir, exist_ok=True)
+    os.makedirs(comp_labels_dir, exist_ok=True)
 
     # 1. Read frames
     frames = read_frames(args.input_folder)
@@ -340,20 +506,32 @@ def main():
     mean_frame = compute_mean_frames(frames[:t])
     var_frame = compute_variance(frames[:t], mean_frame)
 
-    # Save mean and variance images
-    write_png(scale_to_uint8(mean_frame), os.path.join(args.output_folder, "mean.png"))
-    write_png(scale_to_uint8(var_frame), os.path.join(args.output_folder, "variance.png"))
+    write_png(scale_to_uint8(mean_frame), os.path.join(base_out, "mean.png"))
+    write_png(scale_to_uint8(var_frame), os.path.join(base_out, "variance.png"))
 
-    # 4. Generate masks + morphological cleaning
-    masks = []
-    for idx, frame in enumerate(frames):
-        mask = compute_mask(frame, mean_frame, var_frame, threshold=2.0)
-        mask = morphological_operations(mask, kernel_size=3)
-        masks.append((mask * 255).astype(np.uint8))
+    # 4. Parallel frame processing
+    results = []
+    with ProcessPoolExecutor() as executor:
+        futures = [
+            executor.submit(
+                process_single_frame,
+                idx, frame, mean_frame, var_frame,
+                args, masks_dir, comp_masks_dir, comp_labels_dir
+            )
+            for idx, frame in enumerate(frames)
+        ]
+        for f in futures:
+            results.append(f.result())
 
-        out_path = os.path.join(args.output_folder, f"mask_{idx:04d}.{args.output_ext}")
-        write_png(masks[-1], out_path)
+    results.sort(key=lambda x: x[0])
+    masks       = [r[1] for r in results]  # raw motion masks
+    comp_masks  = [r[2] for r in results]  # binary component masks
+    comp_labels = [r[3] for r in results]  # color label visualizations
 
+    # 5. Save videos
+    make_video(masks, os.path.join(base_out, f"masks.{args.video_format}"))
+    make_video(comp_masks, os.path.join(base_out, "components", f"comp_masks.{args.video_format}"))
+    make_video(comp_labels, os.path.join(base_out, "components", f"comp_labels.{args.video_format}"))
 
 if __name__ == "__main__":
     main()
