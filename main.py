@@ -409,7 +409,7 @@ def visualize_components(labeled_mask: np.ndarray, output_file: str):
 
 
 
-def make_video(frames, output_file, fps=20):
+def make_video(frames, output_file, fps=30):
     """
     Save a list of frames (grayscale or RGB) as a video.
 
@@ -434,20 +434,13 @@ def make_video(frames, output_file, fps=20):
     writer.release()
 
 
-
-def process_single_frame(idx, frame, mean_frame, var_frame, args, masks_dir, comps_dir):
+def process_single_frame(idx, frame, mean_frame, var_frame, args, masks_dir, comp_masks_dir, comp_labels_dir):
     # 1. Compute mask + clean
     mask = compute_mask(frame, mean_frame, var_frame, threshold=1)
     mask = morphological_operations(mask, kernel_size=3)
     mask_out = (mask * 255).astype(np.uint8)
 
-    # 2. Save raw mask
-    mask_path = os.path.join(masks_dir, f"mask_{idx:04d}.{args.output_ext}")
-    write_png(mask_out, mask_path)
-
     # --- Create subfolders ---
-    comp_masks_dir = os.path.join(comps_dir, "comp_masks")
-    comp_labels_dir = os.path.join(comps_dir, "comp_labels")
     os.makedirs(comp_masks_dir, exist_ok=True)
     os.makedirs(comp_labels_dir, exist_ok=True)
 
@@ -459,7 +452,8 @@ def process_single_frame(idx, frame, mean_frame, var_frame, args, masks_dir, com
     # Save binary cleaned components (black/white)
     comp_bw_path = os.path.join(comp_masks_dir, f"comp_mask_{idx:04d}.{args.output_ext}")
     write_png(comp_mask, comp_bw_path)
-
+    mask_path = os.path.join(masks_dir, f"mask_{idx:04d}.{args.output_ext}")
+    write_png(mask_out, mask_path)
     # Save visualization (colored blobs)
     comp_vis_path = os.path.join(comp_labels_dir, f"components_{idx:04d}.{args.output_ext}")
     comp_vis = visualize_components(labeled_mask, comp_vis_path)
@@ -467,6 +461,46 @@ def process_single_frame(idx, frame, mean_frame, var_frame, args, masks_dir, com
     return idx, mask_out, comp_mask, comp_vis
 
 
+def alpha_blend_sequence(frames, background, comp_masks, out_dir, output_video, fps=30):
+    """
+    Apply alpha blending to gradually remove person from frames.
+
+    Args:
+        frames (np.ndarray): Original frames [F, H, W]
+        background (np.ndarray): Mean background [H, W]
+        comp_masks (list of np.ndarray): Binary masks [F, H, W]
+        out_dir (str): Folder to save alpha-blended frames
+        output_video (str): Path to save final video
+        fps (int): Frames per second
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    blended_frames = []
+
+    F, H, W = frames.shape
+    bg3 = np.stack([background]*3, axis=-1).astype(np.float32)
+
+    for idx in range(F):
+        frame = frames[idx]
+        mask = (comp_masks[idx] > 0).astype(np.float32)
+
+        # make 3-channel versions
+        frame3 = np.stack([frame]*3, axis=-1).astype(np.float32)
+        mask3  = np.stack([mask]*3, axis=-1)
+
+        alpha = idx / F  # gradual increase from 0 → 1
+        new_frame = frame3 * (1 - alpha * mask3) + bg3 * (mask3 * alpha)
+
+        new_frame = np.clip(new_frame, 0, 255).astype(np.uint8)
+        blended_frames.append(new_frame)
+
+        # save frame
+        out_path = os.path.join(out_dir, f"blend_{idx:04d}.png")
+        write_png(new_frame, out_path)
+
+    # save video
+    make_video(blended_frames, output_video, fps=fps)
+
+    return blended_frames
 
 
 def main():
@@ -484,7 +518,7 @@ def main():
     os.makedirs(base_out, exist_ok=True)
 
     # --- Subfolders ---
-    masks_dir = os.path.join(base_out, "masks")
+    masks_dir = os.path.join(base_out, "morphological_masks")
     comp_masks_dir = os.path.join(base_out, "components", "comp_masks")
     comp_labels_dir = os.path.join(base_out, "components", "comp_labels")
     os.makedirs(masks_dir, exist_ok=True)
@@ -529,9 +563,13 @@ def main():
     comp_labels = [r[3] for r in results]  # color label visualizations
 
     # 5. Save videos
-    make_video(masks, os.path.join(base_out, f"masks.{args.video_format}"))
+    make_video(masks, os.path.join(base_out, f"morphological_masks.{args.video_format}"))
     make_video(comp_masks, os.path.join(base_out, "components", f"comp_masks.{args.video_format}"))
     make_video(comp_labels, os.path.join(base_out, "components", f"comp_labels.{args.video_format}"))
+        # 6. Alpha blending (remove person gradually)
+    alpha_out_dir = os.path.join(base_out, "alpha_blend")
+    alpha_video_path = os.path.join(alpha_out_dir, f"alpha.{args.video_format}")
+    blended_frames = alpha_blend_sequence(frames, mean_frame, comp_masks, alpha_out_dir, alpha_video_path)
 
 if __name__ == "__main__":
     main()
